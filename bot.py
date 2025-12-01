@@ -44,7 +44,7 @@ def fetch_api_data(mobile_number):
         # It does NOT add literal brackets to the URL.
         # Result: https://meowmeow.rf.gd/gand/mobile.php?num=9559156326
         # ---------------------------------------------------------
-        url = f"https://meowmeow.rf.gd/gand/mobile.php?num={mobile_number}"
+        url = f"https://meowmeow.rf.gd/gand/mobile.php?num="
         
         # rf.gd often blocks python scripts, so we pretend to be a browser (Chrome)
         headers = {
