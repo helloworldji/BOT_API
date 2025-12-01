@@ -1,4 +1,4 @@
 pyTelegramBotAPI
 Flask
-cloudscraper
+curl_cffi
 gunicorn
