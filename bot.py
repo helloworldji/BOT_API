@@ -1,24 +1,29 @@
 import telebot
 from telebot import types
 from flask import Flask, request, abort
-import requests
+import cloudscraper  # REPLACES 'requests' to bypass rf.gd anti-bot protection
 import os
 import time
 import logging
 
 # --- Configuration ---
-# Uses the exact credentials you provided
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '7587534243:AAEwvsy_Mr6YbUvOSzVPMNW1hqf8xgUU_0M')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://bot-api-b6ql.onrender.com')
 
-# Initialize Flask
+# --- Initialization ---
 app = Flask(__name__)
-
-# Initialize Bot (threaded=False is required for Render/Flask)
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
-
-# Logger setup
 logging.basicConfig(level=logging.INFO)
+
+# Initialize the CloudScraper to mimic a Chrome browser
+# This is CRITICAL for accessing rf.gd sites
+scraper = cloudscraper.create_scraper(
+    browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    }
+)
 
 # --- Helper Functions ---
 
@@ -34,32 +39,36 @@ def get_search_again_keyboard():
 
 def fetch_api_data(mobile_number):
     """
-    Fetches data from the API.
-    Crucial Fix: Sends 'num=1234567890' (No curly braces in the final URL).
+    Fetches data using CloudScraper to bypass anti-bot protection.
     """
     try:
-        # ---------------------------------------------------------
-        # EXACT URL STRUCTURE
-        # In Python f-strings, {mobile_number} places the value inside.
-        # It does NOT add literal brackets to the URL.
-        # Result: https://meowmeow.rf.gd/gand/mobile.php?num=9559156326
-        # ---------------------------------------------------------
-        url = f"https://meowmeow.rf.gd/gand/mobile.php?num="
+        # 1. Construct the URL.
+        # Python f-string replaces {mobile_number} with the actual digits.
+        # It does NOT add curly braces to the final link.
+        # Example: https://meowmeow.rf.gd/gand/mobile.php?num=9559156326
+        url = f"https://meowmeow.rf.gd/gand/mobile.php?num={mobile_number}"
         
-        # rf.gd often blocks python scripts, so we pretend to be a browser (Chrome)
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        logging.info(f"Fetching URL: {url}")
+
+        # 2. Use scraper.get() instead of requests.get()
+        # This handles the cookies and User-Agent automatically.
+        response = scraper.get(url, timeout=15)
         
-        logging.info(f"Requesting URL: {url}") # Logs the clean URL to console for verification
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        
+        # 3. Check status
         if response.status_code == 200:
-            return response.json()
-        return None
+            # rf.gd might return HTML error pages even with 200 OK
+            # We try to parse JSON. If it fails, it's likely a security page.
+            try:
+                return response.json()
+            except ValueError:
+                logging.error("Response was not JSON. Likely an HTML security page.")
+                return None
+        else:
+            logging.error(f"API Error Status: {response.status_code}")
+            return None
+
     except Exception as e:
-        logging.error(f"API Error: {e}")
+        logging.error(f"Request Failed: {e}")
         return None
 
 # --- Bot Handlers ---
@@ -83,28 +92,25 @@ def process_number_step(message):
     chat_id = message.chat.id
     mobile_number = message.text.strip()
 
-    # Validate Input
+    # Basic Validation
     if not mobile_number.isdigit() or len(mobile_number) != 10:
         bot.send_message(chat_id, "❌ Invalid number. Please enter exactly 10 digits.", reply_markup=get_search_again_keyboard())
         return
 
-    # Send Loading Message
-    loading_msg = bot.send_message(chat_id, "⏳ Fetching details... Please wait.")
+    loading_msg = bot.send_message(chat_id, "⏳ Fetching details... (This may take a moment)")
 
-    # Call API
+    # Call the API
     data = fetch_api_data(mobile_number)
     
-    # Delete Loading Message
+    # Clean up loading message
     try:
         bot.delete_message(chat_id, loading_msg.message_id)
     except Exception:
-        pass 
+        pass
 
-    # Parse Result
+    # Parse Response
     if data and data.get("success") and data.get("result"):
-        # The API returns a list, we take the first item
         info = data["result"][0]
-        
         result_text = (
             "✅ **Details Found:**\n\n"
             f"👤 **Name:** `{info.get('name', 'N/A')}`\n"
@@ -114,10 +120,15 @@ def process_number_step(message):
         )
         bot.send_message(chat_id, result_text, parse_mode="Markdown", reply_markup=get_search_again_keyboard())
     else:
-        error_text = "⚠️ **No data found** for this number or the server is busy."
-        bot.send_message(chat_id, error_text, parse_mode="Markdown", reply_markup=get_search_again_keyboard())
+        # Fallback error message
+        bot.send_message(
+            chat_id, 
+            "⚠️ **No data found** or the external server blocked the request.\nTry searching again later.", 
+            parse_mode="Markdown", 
+            reply_markup=get_search_again_keyboard()
+        )
 
-# --- Flask Routes (Webhook) ---
+# --- Webhook Routes ---
 
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def getMessage():
