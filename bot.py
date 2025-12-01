@@ -1,9 +1,8 @@
 import telebot
 from telebot import types
-from flask import Flask, request, abort
-import cloudscraper  # REPLACES 'requests' to bypass rf.gd anti-bot protection
+from flask import Flask, request
+from curl_cffi import requests  # REPLACES cloudscraper
 import os
-import time
 import logging
 
 # --- Configuration ---
@@ -14,16 +13,6 @@ RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://bot-api-b6q
 app = Flask(__name__)
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 logging.basicConfig(level=logging.INFO)
-
-# Initialize the CloudScraper to mimic a Chrome browser
-# This is CRITICAL for accessing rf.gd sites
-scraper = cloudscraper.create_scraper(
-    browser={
-        'browser': 'chrome',
-        'platform': 'windows',
-        'desktop': True
-    }
-)
 
 # --- Helper Functions ---
 
@@ -39,32 +28,22 @@ def get_search_again_keyboard():
 
 def fetch_api_data(mobile_number):
     """
-    Fetches data using CloudScraper to bypass anti-bot protection.
+    Fetches data using curl_cffi to impersonate a real Chrome browser's TLS signature.
     """
     try:
-        # 1. Construct the URL.
-        # Python f-string replaces {mobile_number} with the actual digits.
-        # It does NOT add curly braces to the final link.
-        # Example: https://meowmeow.rf.gd/gand/mobile.php?num=9559156326
         url = f"https://meowmeow.rf.gd/gand/mobile.php?num={mobile_number}"
-        
         logging.info(f"Fetching URL: {url}")
 
-        # 2. Use scraper.get() instead of requests.get()
-        # This handles the cookies and User-Agent automatically.
-        response = scraper.get(url, timeout=15)
+        # IMPERSONATE CHROME
+        # This sends the request exactly like Chrome version 110 would.
+        response = requests.get(url, impersonate="chrome110", timeout=15)
         
-        # 3. Check status
-        if response.status_code == 200:
-            # rf.gd might return HTML error pages even with 200 OK
-            # We try to parse JSON. If it fails, it's likely a security page.
-            try:
-                return response.json()
-            except ValueError:
-                logging.error("Response was not JSON. Likely an HTML security page.")
-                return None
-        else:
-            logging.error(f"API Error Status: {response.status_code}")
+        # Check if we actually got JSON or the HTML security page
+        try:
+            return response.json()
+        except Exception:
+            # If json decode fails, log the first 100 chars of the text to see what we got
+            logging.error(f"Failed to parse JSON. Response text start: {response.text[:100]}")
             return None
 
     except Exception as e:
@@ -92,23 +71,19 @@ def process_number_step(message):
     chat_id = message.chat.id
     mobile_number = message.text.strip()
 
-    # Basic Validation
     if not mobile_number.isdigit() or len(mobile_number) != 10:
         bot.send_message(chat_id, "❌ Invalid number. Please enter exactly 10 digits.", reply_markup=get_search_again_keyboard())
         return
 
-    loading_msg = bot.send_message(chat_id, "⏳ Fetching details... (This may take a moment)")
+    loading_msg = bot.send_message(chat_id, "⏳ Fetching details...")
 
-    # Call the API
     data = fetch_api_data(mobile_number)
     
-    # Clean up loading message
     try:
         bot.delete_message(chat_id, loading_msg.message_id)
     except Exception:
         pass
 
-    # Parse Response
     if data and data.get("success") and data.get("result"):
         info = data["result"][0]
         result_text = (
@@ -120,10 +95,10 @@ def process_number_step(message):
         )
         bot.send_message(chat_id, result_text, parse_mode="Markdown", reply_markup=get_search_again_keyboard())
     else:
-        # Fallback error message
+        # Detailed error message for you to understand what happened
         bot.send_message(
             chat_id, 
-            "⚠️ **No data found** or the external server blocked the request.\nTry searching again later.", 
+            "⚠️ **No data found.**\n\nThe external server (`rf.gd`) detected the bot and blocked the request.\nTry searching again in a few minutes.", 
             parse_mode="Markdown", 
             reply_markup=get_search_again_keyboard()
         )
