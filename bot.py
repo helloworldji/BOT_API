@@ -1,7 +1,7 @@
 import telebot
 from telebot import types
 from flask import Flask, request
-from curl_cffi import requests  # REPLACES cloudscraper
+import requests
 import os
 import logging
 
@@ -9,7 +9,10 @@ import logging
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '7587534243:AAEwvsy_Mr6YbUvOSzVPMNW1hqf8xgUU_0M')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://bot-api-b6ql.onrender.com')
 
-# --- Initialization ---
+# Global variable to store the cookie in memory
+# (Note: In a real app, you'd use a database, but this works for a simple bot)
+CURRENT_COOKIE = None 
+
 app = Flask(__name__)
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 logging.basicConfig(level=logging.INFO)
@@ -28,23 +31,31 @@ def get_search_again_keyboard():
 
 def fetch_api_data(mobile_number):
     """
-    Fetches data using curl_cffi to impersonate a real Chrome browser's TLS signature.
+    Fetches data using the manually provided '__test' cookie.
     """
+    global CURRENT_COOKIE
+    
+    if not CURRENT_COOKIE:
+        return "NO_COOKIE"
+
     try:
         url = f"https://meowmeow.rf.gd/gand/mobile.php?num={mobile_number}"
-        logging.info(f"Fetching URL: {url}")
-
-        # IMPERSONATE CHROME
-        # This sends the request exactly like Chrome version 110 would.
-        response = requests.get(url, impersonate="chrome110", timeout=15)
         
-        # Check if we actually got JSON or the HTML security page
-        try:
-            return response.json()
-        except Exception:
-            # If json decode fails, log the first 100 chars of the text to see what we got
-            logging.error(f"Failed to parse JSON. Response text start: {response.text[:100]}")
-            return None
+        # We must mimic a browser exactly
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Cookie': f'__test={CURRENT_COOKIE}' 
+        }
+
+        logging.info(f"Fetching with cookie: {CURRENT_COOKIE[:10]}...")
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        # Check if we got the security page again (HTML) instead of JSON
+        if "aes.js" in response.text or "script" in response.text:
+            return "COOKIE_EXPIRED"
+            
+        return response.json()
 
     except Exception as e:
         logging.error(f"Request Failed: {e}")
@@ -56,15 +67,31 @@ def fetch_api_data(mobile_number):
 def send_welcome(message):
     welcome_text = (
         f"👋 Hello {message.from_user.first_name}!\n\n"
-        "I can help you search for details using a mobile number.\n"
-        "Click the button below to get started."
+        "**System Status:** " + ("🟢 Online" if CURRENT_COOKIE else "🔴 Cookie Missing") + "\n\n"
+        "Use /setcookie <value> to update the security token."
     )
     bot.reply_to(message, welcome_text, reply_markup=get_search_keyboard())
+
+@bot.message_handler(commands=['setcookie'])
+def set_cookie_command(message):
+    """Command to manually update the __test cookie."""
+    global CURRENT_COOKIE
+    try:
+        # Extract the cookie value from the message (e.g., "/setcookie d8s7f9d8s7...")
+        cookie_value = message.text.split()[1]
+        CURRENT_COOKIE = cookie_value.strip()
+        bot.reply_to(message, "✅ **Cookie Updated!**\nTry searching now.")
+    except IndexError:
+        bot.reply_to(message, "⚠️ Usage: `/setcookie <your_cookie_value>`\n\nGo to the website -> F12 -> Application -> Cookies -> Copy value of `__test`.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "search_num")
 def callback_query(call):
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.message.chat.id, "Please enter the **10-digit mobile number**:", parse_mode="Markdown")
+    if not CURRENT_COOKIE:
+        bot.send_message(call.message.chat.id, "🔴 **Error:** Cookie is missing.\nPlease use `/setcookie` first.")
+        return
+        
+    msg = bot.send_message(call.message.chat.id, "Enter **10-digit number**:", parse_mode="Markdown")
     bot.register_next_step_handler(msg, process_number_step)
 
 def process_number_step(message):
@@ -72,36 +99,33 @@ def process_number_step(message):
     mobile_number = message.text.strip()
 
     if not mobile_number.isdigit() or len(mobile_number) != 10:
-        bot.send_message(chat_id, "❌ Invalid number. Please enter exactly 10 digits.", reply_markup=get_search_again_keyboard())
+        bot.send_message(chat_id, "❌ Invalid number.")
         return
 
-    loading_msg = bot.send_message(chat_id, "⏳ Fetching details...")
+    loading_msg = bot.send_message(chat_id, "⏳ Fetching...")
 
     data = fetch_api_data(mobile_number)
     
     try:
         bot.delete_message(chat_id, loading_msg.message_id)
-    except Exception:
+    except:
         pass
 
-    if data and data.get("success") and data.get("result"):
+    if data == "NO_COOKIE":
+        bot.send_message(chat_id, "🔴 **System Paused.**\nPlease send a new cookie using `/setcookie`.")
+    elif data == "COOKIE_EXPIRED":
+        bot.send_message(chat_id, "⚠️ **Cookie Expired.**\nThe security token has changed. Please fetch a new `__test` cookie and update it.")
+    elif data and isinstance(data, dict) and data.get("success"):
         info = data["result"][0]
         result_text = (
             "✅ **Details Found:**\n\n"
-            f"👤 **Name:** `{info.get('name', 'N/A')}`\n"
-            f"👨‍👦 **Father's Name:** `{info.get('father_name', 'N/A')}`\n"
-            f"📍 **Address:** `{info.get('address', 'N/A')}`\n"
-            f"📱 **Mobile:** `{info.get('mobile', 'N/A')}`"
+            f"👤 Name: `{info.get('name', 'N/A')}`\n"
+            f"📍 Addr: `{info.get('address', 'N/A')}`\n"
+            f"📱 Mob: `{info.get('mobile', 'N/A')}`"
         )
         bot.send_message(chat_id, result_text, parse_mode="Markdown", reply_markup=get_search_again_keyboard())
     else:
-        # Detailed error message for you to understand what happened
-        bot.send_message(
-            chat_id, 
-            "⚠️ **No data found.**\n\nThe external server (`rf.gd`) detected the bot and blocked the request.\nTry searching again in a few minutes.", 
-            parse_mode="Markdown", 
-            reply_markup=get_search_again_keyboard()
-        )
+        bot.send_message(chat_id, "⚠️ No data found.", reply_markup=get_search_again_keyboard())
 
 # --- Webhook Routes ---
 
@@ -115,15 +139,8 @@ def getMessage():
 @app.route("/")
 def webhook():
     bot.remove_webhook()
-    s = bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/{BOT_TOKEN}")
-    if s:
-        return f"Webhook set to {RENDER_EXTERNAL_URL}", 200
-    else:
-        return "Webhook setup failed", 500
-
-@app.route("/health")
-def health_check():
-    return "Alive", 200
+    bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/{BOT_TOKEN}")
+    return "Webhook Set", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
