@@ -5,7 +5,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # Configuration
 BOT_TOKEN = "7587534243:AAEwvsy_Mr6YbUvOSzVPMNW1hqf8xgUU_0M"
 WEBHOOK_URL = "https://bot-api-b6ql.onrender.com"
-API_URL = "https://meowmeow.rf.gd/gand/mobile.php?num={}&i=1"
+API_URL = "https://meowmeow.rf.gd/gand/mobile.php?num={}"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 user_state = {}
