@@ -1,127 +1,156 @@
 import telebot
+from telebot import types
+from flask import Flask, request, abort
 import requests
 import os
 import time
-from flask import Flask, request
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
+import logging
 
-# ==================== Configuration ====================
+# --- Configuration ---
+# In production on Render, these should be set in the "Environment" tab.
+# We provide defaults here based on your request for immediate testing.
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '7587534243:AAEwvsy_Mr6YbUvOSzVPMNW1hqf8xgUU_0M')
+RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://bot-api-b6ql.onrender.com')
 
-# The New API URL
-API_URL = "https://meowmeow.rf.gd/gand/mobile.php?num={}&i=1"
+# Validate configuration
+if not BOT_TOKEN or not RENDER_EXTERNAL_URL:
+    raise ValueError("BOT_TOKEN and RENDER_EXTERNAL_URL must be set.")
 
-# Webhook Configuration - Ensure no trailing slash
-WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://bot-api-b6ql.onrender.com').rstrip('/')
-
-# Initialize Bot (threaded=False is CRITICAL for Render/Gunicorn)
-bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+# Initialize Flask
 app = Flask(__name__)
 
-# ==================== Helper Functions ====================
-def clean_number(number: str) -> str:
-    cleaned = ''.join(filter(str.isdigit, number))
-    if len(cleaned) > 10:
-        cleaned = cleaned[-10:]
-    return cleaned
+# Initialize Bot (threaded=False is crucial for Flask/Render integration)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
-def fetch_data(mobile: str):
+# Logger setup
+logging.basicConfig(level=logging.INFO)
+
+# --- Helper Functions ---
+
+def get_search_keyboard():
+    """Returns the inline keyboard with the Search button."""
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔍 Search Number", callback_data="search_num"))
+    return markup
+
+def get_search_again_keyboard():
+    """Returns the inline keyboard for searching again."""
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔄 Search Again", callback_data="search_num"))
+    return markup
+
+def fetch_api_data(mobile_number):
+    """
+    Calls the API and parses the JSON.
+    Fixes the issue where brackets were included in the URL.
+    """
     try:
-        url = API_URL.format(mobile)
+        # User specified fix: ensure no extra braces, just the raw number
+        url = f"https://meowmeow.rf.gd/gand/mobile.php?num={mobile_number}"
+        
+        # Headers specifically to mimic a browser, often needed for free hosting like rf.gd
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        response = requests.get(url, headers=headers, timeout=15)
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        
         if response.status_code == 200:
             return response.json()
         return None
     except Exception as e:
-        print(f"API Error: {e}")
+        logging.error(f"API Error: {e}")
         return None
 
-# ==================== Bot Handlers ====================
+# --- Bot Handlers ---
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    print("COMMAND: /start received") # Debug log
-    user_name = message.from_user.first_name
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🔍 Search Number", callback_data="search_mode"))
-    
-    bot.reply_to(message, f"Hi {user_name} 👋\n\nClick the button to start searching.", reply_markup=markup)
+    """Handle /start command."""
+    welcome_text = (
+        f"👋 Hello {message.from_user.first_name}!\n\n"
+        "I can help you search for details using a mobile number.\n"
+        "Click the button below to get started."
+    )
+    bot.reply_to(message, welcome_text, reply_markup=get_search_keyboard())
 
-@bot.callback_query_handler(func=lambda call: call.data == "search_mode")
+@bot.callback_query_handler(func=lambda call: call.data == "search_num")
 def callback_query(call):
+    """Handle the Search Number button click."""
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.message.chat.id, "Send the **10-digit Mobile Number**.")
+    msg = bot.send_message(call.message.chat.id, "Please enter the **10-digit mobile number**:", parse_mode="Markdown")
+    
+    # Register the next step to capture the input
     bot.register_next_step_handler(msg, process_number_step)
 
 def process_number_step(message):
-    if not message.text:
-        bot.reply_to(message, "Text only please.")
+    """Validate input and call API."""
+    chat_id = message.chat.id
+    mobile_number = message.text.strip()
+
+    # 1. Validation
+    if not mobile_number.isdigit() or len(mobile_number) != 10:
+        bot.send_message(chat_id, "❌ Invalid number. Please enter exactly 10 digits.", reply_markup=get_search_again_keyboard())
         return
 
-    mobile = clean_number(message.text)
-    if len(mobile) != 10:
-        bot.reply_to(message, "❌ Invalid number. Send 10 digits.")
-        return
+    # 2. Send "Fetching" message
+    loading_msg = bot.send_message(chat_id, "⏳ Fetching details... Please wait.")
 
-    status_msg = bot.reply_to(message, "🔄 Fetching...")
-    data = fetch_data(mobile)
+    # 3. Call API
+    data = fetch_api_data(mobile_number)
     
+    # 4. Delete "Fetching" message
+    try:
+        bot.delete_message(chat_id, loading_msg.message_id)
+    except Exception:
+        pass # Ignore if message already deleted or too old
+
+    # 5. Process Result
     if data and data.get("success") and data.get("result"):
-        results = data.get("result", [])
-        if len(results) > 0:
-            info = results[0]
-            response_text = (
-                f"✅ **Details Found**\n\n"
-                f"📱 **Mobile:** `{info.get('mobile', 'N/A')}`\n"
-                f"👤 **Name:** {info.get('name', 'N/A')}\n"
-                f"👨‍🦳 **Father Name:** {info.get('father_name', 'N/A')}\n"
-                f"🏠 **Address:** {info.get('address', 'N/A')}\n"
-            )
-            bot.delete_message(message.chat.id, status_msg.message_id)
-            bot.send_message(message.chat.id, response_text, parse_mode="Markdown")
-            
-            # Reset Flow
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("🔍 Search Again", callback_data="search_mode"))
-            bot.send_message(message.chat.id, "Search another?", reply_markup=markup)
-            return
+        # The API returns a list in "result", we take the first item
+        info = data["result"][0]
+        
+        result_text = (
+            "✅ **Details Found:**\n\n"
+            f"👤 **Name:** `{info.get('name', 'N/A')}`\n"
+            f"👨‍👦 **Father's Name:** `{info.get('father_name', 'N/A')}`\n"
+            f"📍 **Address:** `{info.get('address', 'N/A')}`\n"
+            f"📱 **Mobile:** `{info.get('mobile', 'N/A')}`"
+        )
+        bot.send_message(chat_id, result_text, parse_mode="Markdown", reply_markup=get_search_again_keyboard())
+    else:
+        error_text = "⚠️ **No data found** for this number or the server is busy."
+        bot.send_message(chat_id, error_text, parse_mode="Markdown", reply_markup=get_search_again_keyboard())
 
-    bot.edit_message_text("❌ No data found.", message.chat.id, status_msg.message_id)
+# --- Flask Routes for Render Webhook ---
 
-# ==================== Flask Routes ====================
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def getMessage():
-    try:
-        # Debugging: Print that we got a request
-        print("WEBHOOK: Received Update")
-        
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        
-        # Process synchronous
-        bot.process_new_updates([update])
-        
-        return "OK", 200
-    except Exception as e:
-        print(f"WEBHOOK ERROR: {e}")
-        return "Error", 500
+    """Webhook endpoint: Receives updates from Telegram."""
+    json_string = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return "!", 200
 
 @app.route("/")
 def webhook():
+    """Root endpoint: Sets the webhook."""
     bot.remove_webhook()
-    time.sleep(0.5)
-    # Set webhook
-    url_to_set = WEBHOOK_URL + "/" + BOT_TOKEN
-    print(f"Setting webhook to: {url_to_set}") # Debug log
-    bot.set_webhook(url=url_to_set)
-    return f"Webhook set to {url_to_set}", 200
+    # Set webhook to the Render URL + Bot Token
+    s = bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/{BOT_TOKEN}")
+    if s:
+        return f"Webhook set successfully to {RENDER_EXTERNAL_URL}", 200
+    else:
+        return "Webhook setup failed", 500
 
 @app.route("/health")
 def health_check():
+    """Health check endpoint to keep the bot alive."""
     return "Alive", 200
 
+# --- Entry Point ---
+
 if __name__ == "__main__":
+    # Render provides the PORT environment variable
     port = int(os.environ.get('PORT', 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host='0.0.0.0', port=port)
